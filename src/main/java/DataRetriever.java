@@ -37,9 +37,8 @@ public class DataRetriever {
                 // Vérification de la vente associée
                 int saleId = resultSet.getInt("sale_id");
                 if (!resultSet.wasNull()) {
-                    Sale sale = new Sale();
-                    sale.setId(saleId);
-                    sale.setCreationDatetime(resultSet.getTimestamp("sale_creation").toInstant());
+                    // ⚡ Création de Sale immuable via le constructeur
+                    Sale sale = new Sale(saleId, order);
                     order.setSale(sale);
                 }
 
@@ -51,6 +50,7 @@ public class DataRetriever {
             throw new RuntimeException(e);
         }
     }
+
 
 
     private List<DishOrder> findDishOrderByIdOrder(Integer idOrder) {
@@ -132,6 +132,7 @@ public class DataRetriever {
             creation_datetime = EXCLUDED.creation_datetime,
             payment_status = EXCLUDED.payment_status
         RETURNING id
+        
     """;
 
         Connection conn = null;
@@ -413,28 +414,43 @@ public class DataRetriever {
     }
 
     public Sale createSaleFrom(Order order) {
-
         if (order == null) {
             throw new IllegalArgumentException("La commande est obligatoire");
         }
 
         if (order.getPayment_status() != PaymentStatusEnum.PAID) {
-            throw new IllegalStateException(
-                    "Une vente ne peut être créée que pour une commande payée"
-            );
+            throw new IllegalStateException("Une vente ne peut être créée que pour une commande payée");
         }
 
         if (order.getSale() != null) {
-            throw new IllegalStateException(
-                    "Cette commande est déjà associée à une vente"
-            );
+            throw new IllegalStateException("Cette commande est déjà associée à une vente");
         }
 
-        Sale sale = new Sale(null, order);
-        order.setSale(sale);
+        try (Connection conn = new DBConnection().getConnection()) {
+            int saleId = getNextSerialValue(conn, "sale", "id"); // ⚡ génère un id correct
 
-        return sale;
+            Sale sale = new Sale(saleId, order);
+
+            String insertSaleSql = """
+            INSERT INTO sale(id, id_order, creation_datetime)
+            VALUES (?, ?, ?)
+            ON CONFLICT (id) DO NOTHING
+        """;
+
+            try (PreparedStatement ps = conn.prepareStatement(insertSaleSql)) {
+                ps.setInt(1, sale.getId());
+                ps.setInt(2, order.getId());
+                ps.setTimestamp(3, Timestamp.from(sale.getCreationDatetime()));
+                ps.executeUpdate();
+            }
+
+            order.setSale(sale); // ⚡ met à jour la vente en mémoire
+            return sale;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
     }
+
 
 
     public List<Ingredient> createIngredients(List<Ingredient> newIngredients) {
@@ -603,13 +619,17 @@ public class DataRetriever {
 
     private void updateSequenceNextValue(Connection conn, String tableName, String columnName, String sequenceName)
             throws SQLException {
+
         String setValSql = String.format(
-                "SELECT setval('%s', (SELECT COALESCE(MAX(%s), 0) FROM %s))",
+                "SELECT setval('%s', GREATEST(COALESCE(MAX(%s), 1), 1)) FROM \"%s\"",
                 sequenceName, columnName, tableName
         );
+
 
         try (PreparedStatement ps = conn.prepareStatement(setValSql)) {
             ps.executeQuery();
         }
     }
+
+
 }
