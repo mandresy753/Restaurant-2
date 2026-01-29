@@ -12,24 +12,46 @@ public class DataRetriever {
     Order findOrderByReference(String reference) {
         DBConnection dbConnection = new DBConnection();
         try (Connection connection = dbConnection.getConnection()) {
+
+            // Requête pour récupérer la commande et la vente associée si elle existe
             PreparedStatement preparedStatement = connection.prepareStatement("""
-                    select id, reference, creation_datetime from "order" where reference like ?""");
+            SELECT o.id, o.reference, o.creation_datetime, o.payment_status,
+                   s.id AS sale_id, s.creation_datetime AS sale_creation
+            FROM "order" o
+            LEFT JOIN sale s ON s.order_id = o.id
+            WHERE o.reference = ?
+        """);
+
             preparedStatement.setString(1, reference);
             ResultSet resultSet = preparedStatement.executeQuery();
+
             if (resultSet.next()) {
                 Order order = new Order();
                 Integer idOrder = resultSet.getInt("id");
                 order.setId(idOrder);
                 order.setReference(resultSet.getString("reference"));
                 order.setCreationDatetime(resultSet.getTimestamp("creation_datetime").toInstant());
+                order.setPayment_status(PaymentStatusEnum.valueOf(resultSet.getString("payment_status")));
                 order.setDishOrderList(findDishOrderByIdOrder(idOrder));
+
+                // Vérification de la vente associée
+                int saleId = resultSet.getInt("sale_id");
+                if (!resultSet.wasNull()) {
+                    Sale sale = new Sale();
+                    sale.setId(saleId);
+                    sale.setCreationDatetime(resultSet.getTimestamp("sale_creation").toInstant());
+                    order.setSale(sale);
+                }
+
                 return order;
             }
+
             throw new RuntimeException("Order not found with reference " + reference);
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
     }
+
 
     private List<DishOrder> findDishOrderByIdOrder(Integer idOrder) {
         DBConnection dbConnection = new DBConnection();
@@ -86,8 +108,8 @@ public class DataRetriever {
             throw new RuntimeException(e);
         }
     }
-    public Order saveOrder(Order orderToSave) {
 
+    public Order saveOrder(Order orderToSave) {
         String checkStockSql = """
         SELECT initial_stock, name
         FROM ingredient
@@ -96,17 +118,19 @@ public class DataRetriever {
     """;
 
         String updateStockSql = """
-        UPDATE ingre       dient
+        UPDATE ingredient
         SET initial_stock = initial_stock - ?
         WHERE id = ?
     """;
 
+        // Ajout du payment_status dans l'upsert
         String upsertOrderSql = """
-        INSERT INTO "order"(id, reference, creation_datetime)
-        VALUES (?'', ?, ?)
+        INSERT INTO "order"(id, reference, creation_datetime, payment_status)
+        VALUES (?, ?, ?, ?::payment_status_enum)
         ON CONFLICT (id) DO UPDATE
         SET reference = EXCLUDED.reference,
-            creation_datetime = EXCLUDED.creation_datetime
+            creation_datetime = EXCLUDED.creation_datetime,
+            payment_status = EXCLUDED.payment_status
         RETURNING id
     """;
 
@@ -116,59 +140,64 @@ public class DataRetriever {
             conn = new DBConnection().getConnection();
             conn.setAutoCommit(false);
 
+            // ⚠️ Vérification si la commande est déjà payée : impossible de modifier
+            if (orderToSave.getId() != null) {
+                PreparedStatement checkPaidPs = conn.prepareStatement("""
+                SELECT payment_status FROM "order" WHERE id = ?
+            """);
+                checkPaidPs.setInt(1, orderToSave.getId());
+                ResultSet rsCheck = checkPaidPs.executeQuery();
+                if (rsCheck.next()) {
+                    String status = rsCheck.getString("payment_status");
+                    if ("PAID".equals(status)) {
+                        throw new IllegalStateException("Commande déjà payée : modification impossible");
+                    }
+                }
+            }
+
+            // Vérification du stock pour chaque ingrédient
             for (DishOrder dishOrder : orderToSave.getDishOrderList()) {
                 int dishQty = dishOrder.getQuantity();
-
                 for (DishIngredient di : dishOrder.getDish().getDishIngredients()) {
-
                     int ingredientId = di.getIngredient().getId();
                     double needed = di.getQuantity() * dishQty;
 
                     try (PreparedStatement ps = conn.prepareStatement(checkStockSql)) {
                         ps.setInt(1, ingredientId);
                         ResultSet rs = ps.executeQuery();
-
                         if (!rs.next()) {
-                            throw new RuntimeException(
-                                    "Ingrédient introuvable (id=" + ingredientId + ")"
-                            );
+                            throw new RuntimeException("Ingrédient introuvable (id=" + ingredientId + ")");
                         }
-
                         double stock = rs.getDouble("initial_stock");
                         String ingredientName = rs.getString("name");
-
                         if (stock < needed) {
-                            throw new IllegalStateException(
-                                    "Stock insuffisant pour l’ingrédient : " + ingredientName
-                            );
+                            throw new IllegalStateException("Stock insuffisant pour l’ingrédient : " + ingredientName);
                         }
                     }
                 }
             }
 
+            // Sauvegarde ou mise à jour de la commande
             try (PreparedStatement ps = conn.prepareStatement(upsertOrderSql)) {
-
                 if (orderToSave.getId() != null) {
                     ps.setInt(1, orderToSave.getId());
                 } else {
                     ps.setInt(1, getNextSerialValue(conn, "order", "id"));
                 }
-
                 ps.setString(2, orderToSave.getReference());
                 ps.setTimestamp(3, Timestamp.from(orderToSave.getCreationDatetime()));
+                ps.setString(4, orderToSave.getPayment_status().name());
 
                 ResultSet rs = ps.executeQuery();
                 rs.next();
                 orderToSave.setId(rs.getInt("id"));
             }
 
+            // Décrémentation du stock pour chaque ingrédient
             for (DishOrder dishOrder : orderToSave.getDishOrderList()) {
                 int dishQty = dishOrder.getQuantity();
-
                 for (DishIngredient di : dishOrder.getDish().getDishIngredients()) {
-
                     double used = di.getQuantity() * dishQty;
-
                     try (PreparedStatement ps = conn.prepareStatement(updateStockSql)) {
                         ps.setDouble(1, used);
                         ps.setInt(2, di.getIngredient().getId());
@@ -201,6 +230,7 @@ public class DataRetriever {
             }
         }
     }
+
 
     Ingredient saveIngredient(Ingredient toSave) {
         String upsertIngredientSql = """
@@ -380,6 +410,30 @@ public class DataRetriever {
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    public Sale createSaleFrom(Order order) {
+
+        if (order == null) {
+            throw new IllegalArgumentException("La commande est obligatoire");
+        }
+
+        if (order.getPayment_status() != PaymentStatusEnum.PAID) {
+            throw new IllegalStateException(
+                    "Une vente ne peut être créée que pour une commande payée"
+            );
+        }
+
+        if (order.getSale() != null) {
+            throw new IllegalStateException(
+                    "Cette commande est déjà associée à une vente"
+            );
+        }
+
+        Sale sale = new Sale(null, order);
+        order.setSale(sale);
+
+        return sale;
     }
 
 
