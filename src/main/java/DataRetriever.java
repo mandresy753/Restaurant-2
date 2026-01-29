@@ -125,15 +125,16 @@ public class DataRetriever {
 
         // Ajout du payment_status dans l'upsert
         String upsertOrderSql = """
-        INSERT INTO "order"(id, reference, creation_datetime, payment_status)
-        VALUES (?, ?, ?, ?::payment_status_enum)
-        ON CONFLICT (id) DO UPDATE
-        SET reference = EXCLUDED.reference,
-            creation_datetime = EXCLUDED.creation_datetime,
-            payment_status = EXCLUDED.payment_status
-        RETURNING id
-        
-    """;
+INSERT INTO "order"(id, reference, creation_datetime, payment_status)
+VALUES (?, ?, ?, ?::payement_status)
+ON CONFLICT (id) DO UPDATE
+SET reference = EXCLUDED.reference,
+    creation_datetime = EXCLUDED.creation_datetime,
+    payment_status = EXCLUDED.payment_status
+RETURNING id
+""";
+
+
 
         Connection conn = null;
 
@@ -235,14 +236,15 @@ public class DataRetriever {
 
     Ingredient saveIngredient(Ingredient toSave) {
         String upsertIngredientSql = """
-                    INSERT INTO ingredient (id, name, price, category)
-                    VALUES (?, ?, ?, ?::dish_type)
-                    ON CONFLICT (id) DO UPDATE
-                    SET name = EXCLUDED.name,
-                        category = EXCLUDED.category,
-                        price = EXCLUDED.price
-                    RETURNING id
-                """;
+    INSERT INTO ingredient (id, name, price, category)
+    VALUES (?, ?, ?, ?::ingredient_category)
+    ON CONFLICT (id) DO UPDATE
+    SET name = EXCLUDED.name,
+        category = EXCLUDED.category,
+        price = EXCLUDED.price
+    RETURNING id
+""";
+
 
         try (Connection conn = new DBConnection().getConnection()) {
             conn.setAutoCommit(false);
@@ -432,10 +434,11 @@ public class DataRetriever {
             Sale sale = new Sale(saleId, order);
 
             String insertSaleSql = """
-            INSERT INTO sale(id, id_order, creation_datetime)
-            VALUES (?, ?, ?)
-            ON CONFLICT (id) DO NOTHING
-        """;
+INSERT INTO sale(id, order_id, creation_datetime)
+VALUES (?, ?, ?)
+ON CONFLICT (id) DO NOTHING
+""";
+
 
             try (PreparedStatement ps = conn.prepareStatement(insertSaleSql)) {
                 ps.setInt(1, sale.getId());
@@ -463,10 +466,11 @@ public class DataRetriever {
         try {
             conn.setAutoCommit(false);
             String insertSql = """
-                        INSERT INTO ingredient (id, name, category, price)
-                        VALUES (?, ?, ?::ingredient_category, ?)
-                        RETURNING id
-                    """;
+    INSERT INTO ingredient (id, name, category, price)
+    VALUES (?, ?, ?::ingredient_category, ?)
+    RETURNING id
+""";
+
             try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
                 for (Ingredient ingredient : newIngredients) {
                     if (ingredient.getId() != null) {
